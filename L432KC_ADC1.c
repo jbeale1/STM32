@@ -4,26 +4,15 @@
   * @file           : main.c
   * @brief          : Stats from single ADC readings on Nucleo STM32 L432KC
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2023 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <stdio.h>  // printf()
-#include <math.h>   // sqrt()
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <math.h>  // sqrt()
+#include <stdio.h> // printf()
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,7 +22,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define CPU_RATE 32000000   // CPU counter ticks per second
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -76,14 +65,22 @@ PUTCHAR_PROTOTYPE
 int readingCount = 0;  // how many sets of ADC readings done
 
 // Read a set of values from STM32 Nucleo L432KC board 12-bit ADC and get statistics
+// Typical St.Dev. = 3.1 counts. Single-ended input from 1.5V AA (4095 counts = 3.3V)
+// 14800 readings per second (SAMPLES=4k, no ADC oversampling)
+// 16.000 13675.214 13673.658 28240.963 28186.000 28297.000 15.218  (16x oversample)
 void testADC() {  // ================================================================
 
+	  uint32_t tStart, deltaT;
+	  uint32_t start_ms, delta_ms;
 	  int SAMPLES = 40000;
       long datSum = 0;  // reset our accumulated sum of input values to zero
       int sMax = 0;
       int sMin = 65535;
       long n;            // count of how many readings so far
       double x,mean,delta,m2,variance,stdev;  // to calculate standard deviation
+
+      tStart = DWT->CYCCNT;
+      start_ms = HAL_GetTick();
 
       // oldT = millis();   // record start time in milliseconds
 
@@ -109,6 +106,9 @@ void testADC() {  // ===========================================================
       variance = m2/(n-1);  // (n-1):Sample Variance  (n): Population Variance
       stdev = sqrt(variance);  // Calculate standard deviation
 
+      deltaT =  DWT->CYCCNT - tStart; // cycles
+      delta_ms = HAL_GetTick() - start_ms; // milliseconds
+
       //long durT = millis() - oldT;
       float datAvg = (1.0*datSum)/n;
       readingCount++;
@@ -116,7 +116,8 @@ void testADC() {  // ===========================================================
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
 
       printf("%d, ",readingCount);
-      // printf("# Samples/sec: %5.3f", (1000.0*n/durT));
+      printf("%5.3f, ", (1.0E3*n/delta_ms)); // readings per sec
+      printf("%5.3f, ", (1.0*CPU_RATE*n/deltaT)); // readings per sec  32MHz CPU clock
       printf("%5.3f, ", datAvg);
       // printf(" Offset: ");  printf(datAvg - EXPECTED,2);
       printf("%d, ",sMin);
@@ -124,8 +125,6 @@ void testADC() {  // ===========================================================
       printf("%5.3f",stdev);
       printf("\n");
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
-
-      // printf(" T(deg.C): "); printf(tempmonGetTemp(),1);
 
 } //  =====================================================
 
@@ -139,7 +138,10 @@ void testADC() {  // ===========================================================
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+	// enable core cycle counter per https://stackoverflow.com/questions/42747128/
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -171,21 +173,13 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-	  // PB3 is onboard green LED
-	  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
-	  //HAL_Delay(200);
-	  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 
+    /* USER CODE BEGIN 3 */
 
       testADC();
 
-      //float voltage = 3.3f * value / 4096.0f;
-
-      //printf("ADC = %lu (%.3f V)\n", value, voltage); //send the value via UART
-      //printf("%ld\n", value); //send the value via UART
-
       HAL_Delay(5);
-    /* USER CODE BEGIN 3 */
+
   }
   /* USER CODE END 3 */
 }
@@ -284,7 +278,11 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.OversamplingMode = DISABLE;
+  hadc1.Init.OversamplingMode = ENABLE;
+  hadc1.Init.Oversampling.Ratio = ADC_OVERSAMPLING_RATIO_16;
+  hadc1.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_NONE;
+  hadc1.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
+  hadc1.Init.Oversampling.OversamplingStopReset = ADC_REGOVERSAMPLING_CONTINUED_MODE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -408,4 +406,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-
