@@ -4,6 +4,9 @@
   * @file           : main.c
   * @brief          : Stats from single ADC readings on Nucleo STM32 L432KC
   * 43 readings per sec using 20k samples (2 ADC reading/sample)  3-Dec-2023 JPB
+  * 491 rdg/sec with 2k samples, Peak = (Max-Min) output
+  * 840 rdg/sec with 1k samples
+  * full buffer rate: 2.132 kHz @ 1000 samples=> 2.13 MHz rate
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -40,8 +43,20 @@ DMA_HandleTypeDef hdma_adc1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-#define ADC_BUFFER_SIZE 20000
-uint16_t adc_buffer[ADC_BUFFER_SIZE];
+#define ADC_BUFFER_SIZE 500 // was 20k
+uint16_t adc_buffer[ADC_BUFFER_SIZE];  // DMA writes ADC data into this buffer
+uint16_t tBuf[ADC_BUFFER_SIZE/2];       // working buffer for operation & printout
+
+uint32_t counter = 0;
+uint32_t tick=0;      // geiger counter "count"
+uint32_t lastTick=0;
+
+int32_t sMax = 0;
+int32_t sMin = 65535;
+float avgMin = 64.0;
+float avgMinFilt = 0.01;
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,8 +83,13 @@ PUTCHAR_PROTOTYPE
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-int readingCount = 0;  // how many sets of ADC readings done
-volatile int bufReady = false;  // global to indicate when buffer is ready
+int readingCount = 0;            // how many sets of ADC readings done
+int lastValue = 0;               // previous ADC sample, for rising-edge detect
+int last2Value = 0;              // 2nd previous ADC sample, for rising-edge detect
+volatile int buf1Ready = false;  // Ping buffer is ready
+volatile int buf2Ready = false;  // Pong buffer is ready
+
+int pThreshold = 100;            // ADC amplitude threshold for finding rising edge
 
 // Read a set of values from STM32 Nucleo L432KC board 12-bit ADC and get statistics
 // Typical St.Dev. = 3.1 counts. Single-ended input from 1.5V AA (4095 counts = 3.3V)
@@ -80,65 +100,59 @@ volatile int bufReady = false;  // global to indicate when buffer is ready
 // 11824.0 13675.2 13674.4 6620.8 6393.0 6827.0 55.5  KC761 raw signal
 
 
-void testADC() {  // ================================================================
+// Process a Ping or Pong buffer looking for peaks
+void procBuf(int bIndex) {
+    int idxStart, idxEnd;
 
-	  uint32_t tStart, deltaT;
-	  uint32_t start_ms, delta_ms;
-	  int SAMPLES = 40000;
-      long datSum = 0;  // reset our accumulated sum of input values to zero
-      int sMax = 0;
-      int sMin = 65535;
-      long n;            // count of how many readings so far
-      double x,mean,delta,m2,variance,stdev;  // to calculate standard deviation
+    if (bIndex==1) {
+    	idxStart=0;
+    	idxEnd = ADC_BUFFER_SIZE/2;
+    } else {
+    	idxStart=ADC_BUFFER_SIZE/2;
+    	idxEnd = ADC_BUFFER_SIZE;
+    }
 
-      tStart = DWT->CYCCNT;
-      start_ms = HAL_GetTick();
+    // ==================================================
+    /*
+    uint32_t j=0;
+    for (int i = idxStart; i < idxEnd; i++) {
+      tBuf[j] = adc_buffer[i];        // copy into working buffer tBuf[]
+      j++;
+    }
+    */
+    // ==================================================
 
-      // oldT = millis();   // record start time in milliseconds
+    int pThreshold = (132-avgMin);            // ADC amplitude threshold for finding rising edge
+	sMax = 0;
+	sMin = 65535;
 
-      n = 0;     // have not made any ADC readings yet
-      mean = 0; // start off with running mean at zero
-      m2 = 0;
-
-      for (int i=0;i<SAMPLES;i++) {
-        HAL_ADC_Start(&hadc1);
-        HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-        uint32_t value = HAL_ADC_GetValue(&hadc1);
-        x = value;
-
-        // x = analogRead(analogInPin);
-        datSum += x;
-        if (x > sMax) sMax = x;
-        if (x < sMin) sMin = x;
-        n++;
-        delta = x - mean;
-        mean += delta/n;
-        m2 += (delta * (x - mean));
+    for (int i = idxStart; i < idxEnd; i++) {
+    //for (int i = 0; i < ADC_BUFFER_SIZE/2; i++) {
+      //uint32_t x = tBuf[i];
+      uint32_t x = adc_buffer[i];
+      uint32_t xTest = x - avgMin;
+      if ((lastValue < pThreshold) && (last2Value < pThreshold) && (xTest > pThreshold)) {
+    	  tick++;
       }
-      variance = m2/(n-1);  // (n-1):Sample Variance  (n): Population Variance
-      stdev = sqrt(variance);  // Calculate standard deviation
+      if (x > sMax) sMax = x;
+      if (x < sMin) sMin = x;
+      last2Value = lastValue;
+      lastValue = xTest;			// remember current value for next time
+    }
+    avgMin = (avgMin * (1.0-avgMinFilt)) + sMin*avgMinFilt;
+	counter++;
 
-      deltaT =  DWT->CYCCNT - tStart; // cycles
-      delta_ms = HAL_GetTick() - start_ms; // milliseconds
-
-      //long durT = millis() - oldT;
-      float datAvg = (1.0*datSum)/n;
-      readingCount++;
-
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
-
-      printf("%d, ",readingCount);
-      printf("%5.3f, ", (1.0E3*n/delta_ms)); // readings per sec
-      printf("%5.3f, ", (1.0*CPU_RATE*n/deltaT)); // readings per sec  32MHz CPU clock
-      printf("%5.3f, ", datAvg);
-      // printf(" Offset: ");  printf(datAvg - EXPECTED,2);
-      printf("%d, ",sMin);
-      printf("%d, ",sMax);
-      printf("%5.3f",stdev);
-      printf("\n");
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
-
-} //  =====================================================
+	/*
+	if (sMax > 1000) {  // dump this buffer, for large signals
+		printf("sMax = %ld ==============\n",sMax);
+	    for (int i = 0; i < ADC_BUFFER_SIZE/2; i++) {
+	      uint32_t x = tBuf[i];
+	      printf("%ld\n",x);
+	    }
+		printf("\n");
+	}
+	*/
+}
 
 
 /* USER CODE END 0 */
@@ -184,8 +198,6 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  uint32_t counter = 0;
-
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
   while (1)
   {
@@ -194,30 +206,23 @@ int main(void)
     /* USER CODE BEGIN 3 */
     //testADC();
 
+
 	// Wait for DMA buffer to be filled
-	while (!bufReady);
-	bufReady = false;
+	while (!buf1Ready);
+	buf1Ready = false;
+	procBuf(1); // process first half ("ping") of buffer
 
-	counter++;
+	while (!buf2Ready);
+	buf2Ready = false;
+	procBuf(2); // process second half ("pong") of buffer
 
-    // Calculate the average, min, max
-    uint32_t sum = 0;
-    uint32_t sMax = 0;
-    uint32_t sMin = 65535;
-
-    for (int i = 0; i < ADC_BUFFER_SIZE; i++) {
-      uint32_t x = adc_buffer[i];
-      sum += x;
-      if (x > sMax) sMax = x;
-      if (x < sMin) sMin = x;
-    }
-    float average = 1.0 * sum / ADC_BUFFER_SIZE;
-
-    printf("%ld, ",counter);
-    printf("%5.3f, ", average);
-    printf("%ld, ",sMin);
-    printf("%ld\n ",sMax);
-    // printf("%5.3f",stdev);
+    // 800 * 1860 in 1 second => 1.5 MHz
+	if (counter > 1000) {               // report CPS each second
+		printf("%ld, %ld, %ld, %5.1f\n", tick, sMin, sMax, avgMin); // output CPS value, min/max
+		counter = 0;
+		lastTick = tick;
+		tick=0;
+	}
 
     //HAL_Delay(50);
 
@@ -319,11 +324,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.OversamplingMode = ENABLE;
-  hadc1.Init.Oversampling.Ratio = ADC_OVERSAMPLING_RATIO_2;
-  hadc1.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_NONE;
-  hadc1.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
-  hadc1.Init.Oversampling.OversamplingStopReset = ADC_REGOVERSAMPLING_CONTINUED_MODE;
+  hadc1.Init.OversamplingMode = DISABLE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -433,18 +434,78 @@ static void MX_GPIO_Init(void)
 // Called when first half of buffer is filled
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
   // HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-  //bufReady = true;
+  buf1Ready = true;  // Ping buffer is ready
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
 
 }
 
 // Called when buffer is completely filled
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
-  bufReady = true;
+  buf2Ready = true;  // Pong buffer is ready
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
   // HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 }
 
+// ================================================================
+void testADC() {
+
+	  uint32_t tStart, deltaT;
+	  uint32_t start_ms, delta_ms;
+	  int SAMPLES = 40000;
+      long datSum = 0;  // reset our accumulated sum of input values to zero
+      int sMax = 0;
+      int sMin = 65535;
+      long n;            // count of how many readings so far
+      double x,mean,delta,m2,variance,stdev;  // to calculate standard deviation
+
+      tStart = DWT->CYCCNT;
+      start_ms = HAL_GetTick();
+
+      // oldT = millis();   // record start time in milliseconds
+
+      n = 0;     // have not made any ADC readings yet
+      mean = 0; // start off with running mean at zero
+      m2 = 0;
+
+      for (int i=0;i<SAMPLES;i++) {
+        HAL_ADC_Start(&hadc1);
+        HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+        uint32_t value = HAL_ADC_GetValue(&hadc1);
+        x = value;
+
+        // x = analogRead(analogInPin);
+        datSum += x;
+        if (x > sMax) sMax = x;
+        if (x < sMin) sMin = x;
+        n++;
+        delta = x - mean;
+        mean += delta/n;
+        m2 += (delta * (x - mean));
+      }
+      variance = m2/(n-1);  // (n-1):Sample Variance  (n): Population Variance
+      stdev = sqrt(variance);  // Calculate standard deviation
+
+      deltaT =  DWT->CYCCNT - tStart; // cycles
+      delta_ms = HAL_GetTick() - start_ms; // milliseconds
+
+      //long durT = millis() - oldT;
+      float datAvg = (1.0*datSum)/n;
+      readingCount++;
+
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
+
+      printf("%d, ",readingCount);
+      printf("%5.3f, ", (1.0E3*n/delta_ms)); // readings per sec
+      printf("%5.3f, ", (1.0*CPU_RATE*n/deltaT)); // readings per sec  32MHz CPU clock
+      printf("%5.3f, ", datAvg);
+      // printf(" Offset: ");  printf(datAvg - EXPECTED,2);
+      printf("%d, ",sMin);
+      printf("%d, ",sMax);
+      printf("%5.3f",stdev);
+      printf("\n");
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
+
+} //  ======================
 /* USER CODE END 4 */
 
 /**
