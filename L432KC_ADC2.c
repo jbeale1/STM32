@@ -7,6 +7,11 @@
   * 491 rdg/sec with 2k samples, Peak = (Max-Min) output
   * 840 rdg/sec with 1k samples
   * full buffer rate: 2.132 kHz @ 1000 samples=> 2.13 MHz rate
+  * 4.264 kHz @ 500 samples (buffer callback) 0.6984 kHz (main proc. rate) ratio 6:1
+  * 4x oversample: @ 500 samples: 1.0661 kHz (buf callback)  0.8557 kHz proc
+  * 4x over: @ 1000 samples: 0.5330 kHz (buf callbk)  0.4374 kHz proc
+  * 4x over: @ 4k samples:  133.26 Hz (buf callbk)  111.38 Hz proc
+  * 8x over: @ 4k samples:  66.63 Hz (buff callbk)  66.63 Hz proc <= SYNC!
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -43,7 +48,7 @@ DMA_HandleTypeDef hdma_adc1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-#define ADC_BUFFER_SIZE 500 // was 20k
+#define ADC_BUFFER_SIZE 4000 // was 20k
 uint16_t adc_buffer[ADC_BUFFER_SIZE];  // DMA writes ADC data into this buffer
 uint16_t tBuf[ADC_BUFFER_SIZE/2];       // working buffer for operation & printout
 
@@ -53,7 +58,7 @@ uint32_t lastTick=0;
 
 int32_t sMax = 0;
 int32_t sMin = 65535;
-float avgMin = 64.0;
+float avgMin = 360.0;  // 64 for no oversamp, 360 @ 4x
 float avgMinFilt = 0.01;
 
 
@@ -122,7 +127,8 @@ void procBuf(int bIndex) {
     */
     // ==================================================
 
-    int pThreshold = (132-avgMin);            // ADC amplitude threshold for finding rising edge
+    // int pThreshold = (132-avgMin);         // ADC thresh for rising edge (no oversamp)
+    int pThreshold = (510-avgMin);            // ADC thresh for rising edge (8x oversamp, <1 bitshft)
 	sMax = 0;
 	sMin = 65535;
 
@@ -211,13 +217,15 @@ int main(void)
 	while (!buf1Ready);
 	buf1Ready = false;
 	procBuf(1); // process first half ("ping") of buffer
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
 
 	while (!buf2Ready);
 	buf2Ready = false;
 	procBuf(2); // process second half ("pong") of buffer
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 
     // 800 * 1860 in 1 second => 1.5 MHz
-	if (counter > 1000) {               // report CPS each second
+	if (counter > 132) {               // report CPS each second
 		printf("%ld, %ld, %ld, %5.1f\n", tick, sMin, sMax, avgMin); // output CPS value, min/max
 		counter = 0;
 		lastTick = tick;
@@ -324,7 +332,11 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.OversamplingMode = DISABLE;
+  hadc1.Init.OversamplingMode = ENABLE;
+  hadc1.Init.Oversampling.Ratio = ADC_OVERSAMPLING_RATIO_8;
+  hadc1.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_1;
+  hadc1.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
+  hadc1.Init.Oversampling.OversamplingStopReset = ADC_REGOVERSAMPLING_CONTINUED_MODE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -433,17 +445,16 @@ static void MX_GPIO_Init(void)
 
 // Called when first half of buffer is filled
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
-  // HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
   buf1Ready = true;  // Ping buffer is ready
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
+  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
 
 }
 
 // Called when buffer is completely filled
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
   buf2Ready = true;  // Pong buffer is ready
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
-  // HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
+
 }
 
 // ================================================================
